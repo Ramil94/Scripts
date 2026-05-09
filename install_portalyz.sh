@@ -185,9 +185,19 @@ echo -e "${GREEN} Установка ${APP_NAME} успешно завершен
 echo -e "${GREEN}=================================================${NC}"
 echo -e "Панель управления: ${BLUE}${FINAL_URL}${NC}"
 echo -e "Директория:        ${BLUE}${INSTALL_DIR}${NC}"
-echo -e "Суперадмин:        ${BLUE}amsadmin${NC} / (Ваш пароль)"
-echo -e "Директор:          ${BLUE}amsdirektor${NC} / amsdirektor"
-echo -e "Менеджер:          ${BLUE}amsmanager${NC} / amsmanager"
+
+if [ "$DB_CHOICE" == "2" ]; then
+    echo -e "\n${YELLOW}--- ТЕСТОВЫЕ УЧЕТНЫЕ ЗАПИСИ (ИЗ ДАМПА) ---${NC}"
+    echo -e "Суперадмин:        ${BLUE}admin${NC} / passwordAMS12"
+    echo -e "Директор:          ${BLUE}direktor${NC} / passwordAMS22"
+    echo -e "Менеджеры:         ${BLUE}userm1 ... userm5${NC} / passwordAMS32"
+else
+    echo -e "\n${YELLOW}--- БОЕВЫЕ УЧЕТНЫЕ ЗАПИСИ ---${NC}"
+    echo -e "Суперадмин:        ${BLUE}amsadmin${NC} / (Ваш пароль)"
+    echo -e "Директор:          ${BLUE}amsdirektor${NC} / amsdirektor"
+    echo -e "Менеджер:          ${BLUE}amsmanager${NC} / amsmanager"
+fi
+
 echo -e "\n${YELLOW}Доступы для оборудования (pfSense / MikroTik):${NC}"
 echo -e "IP адрес RADIUS:   ${BLUE}${SERVER_IP}${NC}"
 echo -e "Порты RADIUS:      ${BLUE}1812 (Auth), 1813 (Acct)${NC}"
