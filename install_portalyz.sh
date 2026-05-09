@@ -25,7 +25,7 @@ read -s -p "Введите ваш GitHub Token: " GIT_TOKEN
 echo ""
 
 echo -e "\n${BLUE}Скачиваем проект с GitHub в ${INSTALL_DIR}...${NC}"
-# Жестко удаляем старую папку, включая старую базу данных
+# Жестко удаляем старую папку, включая старую базу данных, для чистой установки
 sudo rm -rf "$INSTALL_DIR"
 git clone https://${GIT_TOKEN}@github.com/Ramil94/portalyz.git "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -49,7 +49,6 @@ while true; do
     fi
 done
 
-# === НОВЫЙ БЛОК: Пароль для панели управления ===
 echo -e "\n${GREEN}--- Доступ в панель управления ---${NC}"
 read -p "Придумайте пароль для суперадмина (логин: amsadmin): " ADMIN_UI_PASS
 
@@ -75,6 +74,7 @@ ADMIN_EMAIL=admin@your-domain.com
 HETZNER_Token=your_hetzner_dns_token_here
 EOF
 
+# ВАЖНО: В твоем GitHub репозитории в файлах freeradius должны быть дефолтные значения: Pass208945Vb и YzPortalSecret2026!
 sed -i "s/Pass208945Vb/${DB_PASS}/g" freeradius/mods-enabled/sql
 sed -i "s/secret = YzPortalSecret2026!/secret = ${RADIUS_SECRET}/g" freeradius/clients.conf
 
@@ -88,8 +88,7 @@ rm -rf sql-init && mkdir -p sql-init
 cp 01_schema.sql sql-init/
 cp 02_default_settings.sql sql-init/
 
-# === МАГИЯ ПОЛЬЗОВАТЕЛЕЙ ===
-# Создаем файл 02_core_users.sql, который Postgres выполнит при запуске
+# Магия пользователей: Postgres сам хэширует пароли при запуске
 cat <<EOF > sql-init/02_core_users.sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -129,17 +128,68 @@ if [ "$DB_CHOICE" == "2" ]; then
     docker exec -it ams_backend python -m scripts.generate_history_v2 || true
 fi
 
-FINAL_URL="https://${SERVER_IP}${ADMIN_PREFIX}"
+# ==========================================
+# БЛОК SSL И ДОМЕНА (ВОЗВРАЩЕН НА МЕСТО)
+# ==========================================
+echo -e "\n${YELLOW}=================================================${NC}"
+read -p "Хотите сейчас привязать доменное имя и настроить чистый SSL? (y/n): " SETUP_SSL
+
+if [[ "$SETUP_SSL" =~ ^[Yy]$ ]]; then
+    read -p "Введите ваше доменное имя (например, portal.example.com): " DOMAIN_NAME
+    sed -i "s/DOMAIN=.*/DOMAIN=${DOMAIN_NAME}/g" .env
+
+    echo -e "\n${YELLOW}Выберите метод получения SSL сертификата:${NC}"
+    echo "1) Let's Encrypt: HTTP-01 (белый IP, 80 порт открыт)"
+    echo "2) Let's Encrypt: DNS API Hetzner (Серый IP / Hetzner)"
+    echo "3) Использовать свои файлы сертификата (.crt и .key)"
+    read -p "Ваш выбор (1, 2 или 3): " SSL_METHOD
+
+    if [ "$SSL_METHOD" == "3" ]; then
+        echo -e "\n${YELLOW}Установка ваших файлов...${NC}"
+        read -p "Путь к файлу .crt: " CRT_PATH
+        read -p "Путь к файлу .key: " KEY_PATH
+        cp "$CRT_PATH" ssl/server.crt
+        cp "$KEY_PATH" ssl/server.key
+        docker compose restart nginx
+    else
+        if [ ! -d "$HOME/.acme.sh" ]; then
+            echo -e "\n${BLUE}Устанавливаем acme.sh...${NC}"
+            read -p "Введите Email для регистрации: " ADMIN_EMAIL
+            curl https://get.acme.sh | sh -s email=$ADMIN_EMAIL
+        fi
+        ACME="$HOME/.acme.sh/acme.sh"
+
+        if [ "$SSL_METHOD" == "1" ]; then
+            docker compose stop nginx
+            $ACME --issue --standalone -d "$DOMAIN_NAME" || true
+            docker compose start nginx
+        elif [ "$SSL_METHOD" == "2" ]; then
+            read -p "Введите Hetzner API Token: " HETZNER_API
+            export HETZNER_Token="$HETZNER_API"
+            $ACME --issue --dns dns_hetzner -d "$DOMAIN_NAME" --dnssleep 120 || true
+        fi
+
+        echo -e "\n${BLUE}Устанавливаем сертификат в Nginx...${NC}"
+        $ACME --install-cert -d "$DOMAIN_NAME" \
+          --key-file "$INSTALL_DIR/ssl/server.key" \
+          --fullchain-file "$INSTALL_DIR/ssl/server.crt" \
+          --reloadcmd "cd $INSTALL_DIR && docker compose restart nginx"
+    fi
+    FINAL_URL="https://${DOMAIN_NAME}${ADMIN_PREFIX}"
+else
+    FINAL_URL="https://${SERVER_IP}${ADMIN_PREFIX}"
+fi
 
 echo -e "\n${GREEN}=================================================${NC}"
 echo -e "${GREEN} Установка ${APP_NAME} успешно завершена!        ${NC}"
 echo -e "${GREEN}=================================================${NC}"
 echo -e "Панель управления: ${BLUE}${FINAL_URL}${NC}"
+echo -e "Директория:        ${BLUE}${INSTALL_DIR}${NC}"
 echo -e "Суперадмин:        ${BLUE}amsadmin${NC} / (Ваш пароль)"
 echo -e "Директор:          ${BLUE}amsdirektor${NC} / amsdirektor"
 echo -e "Менеджер:          ${BLUE}amsmanager${NC} / amsmanager"
 echo -e "\n${YELLOW}Доступы для оборудования (pfSense / MikroTik):${NC}"
-echo -e "IP адрес RADIUS:        ${BLUE}${SERVER_IP}${NC}"
-echo -e "Порты RADIUS:           ${BLUE}1812 (Auth), 1813 (Acct)${NC}"
-echo -e "RADIUS Shared Secret:   ${RED}${RADIUS_SECRET}${NC}  <-- ВПИШИТЕ ЭТО В PFSENSE!"
+echo -e "IP адрес RADIUS:   ${BLUE}${SERVER_IP}${NC}"
+echo -e "Порты RADIUS:      ${BLUE}1812 (Auth), 1813 (Acct)${NC}"
+echo -e "RADIUS Secret:     ${RED}${RADIUS_SECRET}${NC}  <-- ВПИШИТЕ ЭТО В PFSENSE!"
 echo -e "${GREEN}=================================================${NC}"
