@@ -10,9 +10,45 @@ NC='\033[0m'
 INSTALL_DIR="/opt/cportal-ams"
 
 echo -e "${BLUE}=================================================${NC}"
-echo -e "${GREEN}   Универсальный установщик Portal AMS (Prod)    ${NC}"
+echo -e "${GREEN}   Универсальный менеджер Portal AMS (Prod)      ${NC}"
 echo -e "${BLUE}=================================================${NC}"
 
+echo -e "Выберите действие:"
+echo -e "  ${GREEN}1) Установить / Обновить систему${NC}"
+echo -e "  ${RED}2) Полностью УДАЛИТЬ систему (Деинсталляция)${NC}"
+read -p "Ваш выбор (1 или 2): " MAIN_ACTION
+
+# ==========================================
+# БЛОК ДЕИНСТАЛЛЯЦИИ
+# ==========================================
+if [ "$MAIN_ACTION" == "2" ]; then
+    echo -e "\n${RED}ВНИМАНИЕ! Вы собираетесь безвозвратно удалить:${NC}"
+    echo "- Все Docker контейнеры AMS"
+    echo "- Базу данных и всех пользователей"
+    echo "- Всю историю и выданные ваучеры"
+    echo "- Все файлы сертификатов и исходный код"
+    read -p "Вы АБСОЛЮТНО уверены? Напишите 'YES' для подтверждения: " CONFIRM_DELETE
+    
+    if [ "$CONFIRM_DELETE" == "YES" ]; then
+        echo -e "\n${YELLOW}Останавливаем и удаляем контейнеры...${NC}"
+        if [ -d "$INSTALL_DIR" ]; then
+            cd "$INSTALL_DIR"
+            docker compose down -v || true
+        fi
+        echo -e "${YELLOW}Удаляем директорию проекта...${NC}"
+        cd /
+        sudo rm -rf "$INSTALL_DIR"
+        echo -e "${GREEN}Система Portal AMS полностью удалена с сервера!${NC}"
+        exit 0
+    else
+        echo -e "${BLUE}Удаление отменено.${NC}"
+        exit 0
+    fi
+fi
+
+# ==========================================
+# БЛОК УСТАНОВКИ
+# ==========================================
 if ! command -v docker &> /dev/null; then
     echo -e "${YELLOW}Устанавливаем Docker...${NC}"
     curl -fsSL https://get.docker.com -o get-docker.sh
@@ -25,7 +61,6 @@ read -s -p "Введите ваш GitHub Token: " GIT_TOKEN
 echo ""
 
 echo -e "\n${BLUE}Скачиваем проект с GitHub в ${INSTALL_DIR}...${NC}"
-# Жестко удаляем старую папку, включая старую базу данных, для чистой установки
 sudo rm -rf "$INSTALL_DIR"
 git clone https://${GIT_TOKEN}@github.com/Ramil94/portalyz.git "$INSTALL_DIR"
 cd "$INSTALL_DIR"
@@ -49,10 +84,18 @@ while true; do
     fi
 done
 
-echo -e "\n${GREEN}--- Доступ в панель управления ---${NC}"
-read -p "Придумайте пароль для суперадмина (логин: amsadmin): " ADMIN_UI_PASS
-
 RADIUS_SECRET=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16 ; echo '')
+
+echo -e "\n${YELLOW}--- Режим Установки ---${NC}"
+echo "1) Чистая (Боевая) установка (Суперадмин + Директор + Менеджер)"
+echo "2) Тестовая установка (Админ + Директор + 5 тестовых менеджеров + Ваучеры)"
+read -p "Выберите вариант (1 или 2): " DB_CHOICE
+
+# Если ставим чистую базу, нам нужен пароль. Если тестовую - пароли стандартизированы.
+if [ "$DB_CHOICE" == "1" ]; then
+    echo -e "\n${GREEN}--- Доступ в панель управления ---${NC}"
+    read -p "Придумайте пароль для суперадмина (логин: amsadmin): " ADMIN_UI_PASS
+fi
 
 echo -e "\n${BLUE}Настраиваем конфигурации...${NC}"
 cat <<EOF > .env
@@ -74,33 +117,37 @@ ADMIN_EMAIL=admin@your-domain.com
 HETZNER_Token=your_hetzner_dns_token_here
 EOF
 
-# ВАЖНО: В твоем GitHub репозитории в файлах freeradius должны быть дефолтные значения: Pass208945Vb и YzPortalSecret2026!
 sed -i "s/Pass208945Vb/${DB_PASS}/g" freeradius/mods-enabled/sql
 sed -i "s/secret = YzPortalSecret2026!/secret = ${RADIUS_SECRET}/g" freeradius/clients.conf
-
-echo -e "\n${YELLOW}--- Настройка Базы Данных ---${NC}"
-echo "1) Чистая установка (Структура + 3 базовых пользователя)"
-echo "2) Тестовая установка (Структура + Пользователи + Ваучеры)"
-read -p "Выберите вариант (1 или 2): " DB_CHOICE
 
 # Готовим папку инициализации
 rm -rf sql-init && mkdir -p sql-init
 cp 01_schema.sql sql-init/
 cp 02_default_settings.sql sql-init/
 
-# Магия пользователей: Postgres сам хэширует пароли при запуске
-cat <<EOF > sql-init/02_core_users.sql
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+# === МАГИЯ ПОЛЬЗОВАТЕЛЕЙ (ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ) ===
+echo "CREATE EXTENSION IF NOT EXISTS pgcrypto;" > sql-init/02_core_users.sql
 
+if [ "$DB_CHOICE" == "1" ]; then
+cat <<EOF >> sql-init/02_core_users.sql
 INSERT INTO users_admin (login, password_hash, role, full_name) VALUES
 ('amsadmin', crypt('${ADMIN_UI_PASS}', gen_salt('bf', 12)), 'sysadmin', 'Portal Admin'),
 ('amsmanager', crypt('amsmanager', gen_salt('bf', 12)), 'manager', 'Portal Manager'),
 ('amsdirektor', crypt('amsdirektor', gen_salt('bf', 12)), 'director', 'Portal Direktor')
 ON CONFLICT (login) DO NOTHING;
 EOF
-
-if [ "$DB_CHOICE" == "2" ]; then
-    cp 03_dummy_data.sql sql-init/
+else
+cat <<EOF >> sql-init/02_core_users.sql
+INSERT INTO users_admin (login, password_hash, role, full_name) VALUES
+('admin', crypt('passwordAMS12', gen_salt('bf', 12)), 'sysadmin', 'Test Admin'),
+('direktor', crypt('passwordAMS22', gen_salt('bf', 12)), 'director', 'Чары Гурбанов'),
+('userm1', crypt('passwordAMS32', gen_salt('bf', 12)), 'manager', 'Анна Соколова'),
+('userm2', crypt('passwordAMS32', gen_salt('bf', 12)), 'manager', 'Анастасия Волк'),
+('userm3', crypt('passwordAMS32', gen_salt('bf', 12)), 'manager', 'Айгуль Аманова'),
+('userm4', crypt('passwordAMS32', gen_salt('bf', 12)), 'manager', 'Дмитрий Иванов'),
+('userm5', crypt('passwordAMS32', gen_salt('bf', 12)), 'manager', 'Мердан Сапаров')
+ON CONFLICT (login) DO NOTHING;
+EOF
 fi
 
 echo -e "\n${YELLOW}--- Инициализация локального SSL ---${NC}"
@@ -129,7 +176,7 @@ if [ "$DB_CHOICE" == "2" ]; then
 fi
 
 # ==========================================
-# БЛОК SSL И ДОМЕНА (ВОЗВРАЩЕН НА МЕСТО)
+# БЛОК SSL И ДОМЕНА
 # ==========================================
 echo -e "\n${YELLOW}=================================================${NC}"
 read -p "Хотите сейчас привязать доменное имя и настроить чистый SSL? (y/n): " SETUP_SSL
@@ -187,7 +234,7 @@ echo -e "Панель управления: ${BLUE}${FINAL_URL}${NC}"
 echo -e "Директория:        ${BLUE}${INSTALL_DIR}${NC}"
 
 if [ "$DB_CHOICE" == "2" ]; then
-    echo -e "\n${YELLOW}--- ТЕСТОВЫЕ УЧЕТНЫЕ ЗАПИСИ (ИЗ ДАМПА) ---${NC}"
+    echo -e "\n${YELLOW}--- ТЕСТОВЫЕ УЧЕТНЫЕ ЗАПИСИ ---${NC}"
     echo -e "Суперадмин:        ${BLUE}admin${NC} / passwordAMS12"
     echo -e "Директор:          ${BLUE}direktor${NC} / passwordAMS22"
     echo -e "Менеджеры:         ${BLUE}userm1 ... userm5${NC} / passwordAMS32"
