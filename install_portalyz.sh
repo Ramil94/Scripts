@@ -62,7 +62,7 @@ echo ""
 
 echo -e "\n${BLUE}Скачиваем проект с GitHub в ${INSTALL_DIR}...${NC}"
 sudo rm -rf "$INSTALL_DIR"
-git clone https://${GIT_TOKEN}@github.com/Ramil94/portalyz.git "$INSTALL_DIR"
+git clone https://${GIT_TOKEN}@github.com/Ramil94/CPortal-AMS.git "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
 echo -e "\n${GREEN}--- Брендирование системы ---${NC}"
