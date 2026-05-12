@@ -181,13 +181,17 @@ fi
 echo -e "\n${YELLOW}=================================================${NC}"
 read -p "Хотите сейчас привязать доменное имя и настроить чистый SSL? (y/n): " SETUP_SSL
 
+# По умолчанию финальный URL будет по IP
+FINAL_URL="https://${SERVER_IP}${ADMIN_PREFIX}"
+
 if [[ "$SETUP_SSL" =~ ^[Yy]$ ]]; then
     read -p "Введите ваше доменное имя (например, portal.example.com): " DOMAIN_NAME
     sed -i "s/DOMAIN=.*/DOMAIN=${DOMAIN_NAME}/g" .env
+    FINAL_URL="https://${DOMAIN_NAME}${ADMIN_PREFIX}"
 
     echo -e "\n${YELLOW}Выберите метод получения SSL сертификата:${NC}"
     echo "1) Let's Encrypt: HTTP-01 (белый IP, 80 порт открыт)"
-    echo "2) Let's Encrypt: DNS API Hetzner (Серый IP / Hetzner)"
+    echo "2) Let's Encrypt: DNS API Hetzner (Hetzner Cloud Console / Новый API)"
     echo "3) Использовать свои файлы сертификата (.crt и .key)"
     read -p "Ваш выбор (1, 2 или 3): " SSL_METHOD
 
@@ -195,38 +199,70 @@ if [[ "$SETUP_SSL" =~ ^[Yy]$ ]]; then
         echo -e "\n${YELLOW}Установка ваших файлов...${NC}"
         read -p "Путь к файлу .crt: " CRT_PATH
         read -p "Путь к файлу .key: " KEY_PATH
-        cp "$CRT_PATH" ssl/server.crt
-        cp "$KEY_PATH" ssl/server.key
-        docker compose restart nginx
+        if [ -f "$CRT_PATH" ] && [ -f "$KEY_PATH" ]; then
+            cp "$CRT_PATH" ssl/server.crt
+            cp "$KEY_PATH" ssl/server.key
+            docker compose restart nginx
+            echo -e "${GREEN}Ваши сертификаты успешно установлены!${NC}"
+        else
+            echo -e "${RED}Ошибка: Файлы сертификатов не найдены! Портал будет работать с самоподписанным сертификатом.${NC}"
+        fi
     else
         if [ ! -d "$HOME/.acme.sh" ]; then
             echo -e "\n${BLUE}Устанавливаем acme.sh...${NC}"
-            read -p "Введите Email для регистрации: " ADMIN_EMAIL
+            read -p "Введите Email для регистрации в Let's Encrypt: " ADMIN_EMAIL
             curl https://get.acme.sh | sh -s email=$ADMIN_EMAIL
         fi
+        
+        # Устанавливаем Let's Encrypt как сервер по умолчанию
+        $HOME/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1
         ACME="$HOME/.acme.sh/acme.sh"
+        
+        CERT_SUCCESS=false
 
         if [ "$SSL_METHOD" == "1" ]; then
+            echo -e "\n${BLUE}Выпускаем сертификат через HTTP-01...${NC}"
             docker compose stop nginx
-            $ACME --issue --standalone -d "$DOMAIN_NAME" || true
+            if $ACME --issue --standalone -d "$DOMAIN_NAME" --force; then
+                CERT_SUCCESS=true
+            else
+                echo -e "${RED}Ошибка выпуска сертификата (HTTP-01). Проверьте, открыт ли 80 порт и привязан ли домен к IP.${NC}"
+            fi
             docker compose start nginx
+
         elif [ "$SSL_METHOD" == "2" ]; then
-            read -p "Введите Hetzner API Token: " HETZNER_API
-            export HETZNER_Token="$HETZNER_API"
-            $ACME --issue --dns dns_hetzner -d "$DOMAIN_NAME" --dnssleep 120 || true
+            echo -e "\n${BLUE}Внимание: Используется новый Hetzner Cloud DNS API.${NC}"
+            read -p "Введите Hetzner API Token (из Cloud Console): " HETZNER_API
+            export HETZNER_TOKEN="$HETZNER_API"
+            
+            echo -e "${YELLOW}Выпускаем сертификат через DNS API (потребуется около 2 минут)...${NC}"
+            if $ACME --issue --dns dns_hetznercloud -d "$DOMAIN_NAME" --force --dnssleep 120; then
+                CERT_SUCCESS=true
+            else
+                echo -e "${RED}Ошибка выпуска сертификата (DNS Hetzner). Проверьте токен и наличие DNS зоны.${NC}"
+            fi
         fi
 
-        echo -e "\n${BLUE}Устанавливаем сертификат в Nginx...${NC}"
-        $ACME --install-cert -d "$DOMAIN_NAME" \
-          --key-file "$INSTALL_DIR/ssl/server.key" \
-          --fullchain-file "$INSTALL_DIR/ssl/server.crt" \
-          --reloadcmd "cd $INSTALL_DIR && docker compose restart nginx"
+        # Пытаемся установить сертификат только если он был успешно выпущен
+        if [ "$CERT_SUCCESS" = true ]; then
+            echo -e "\n${BLUE}Устанавливаем сертификат в Nginx...${NC}"
+            if $ACME --install-cert -d "$DOMAIN_NAME" \
+              --key-file "$INSTALL_DIR/ssl/server.key" \
+              --fullchain-file "$INSTALL_DIR/ssl/server.crt" \
+              --reloadcmd "cd $INSTALL_DIR && docker compose restart nginx"; then
+                echo -e "${GREEN}Сертификат успешно установлен!${NC}"
+            else
+                echo -e "${RED}Ошибка установки сертификата в Nginx. Портал будет работать с самоподписанным.${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Пропускаем установку в Nginx из-за ошибки выпуска. Система продолжит работу с локальным сертификатом.${NC}"
+        fi
     fi
-    FINAL_URL="https://${DOMAIN_NAME}${ADMIN_PREFIX}"
-else
-    FINAL_URL="https://${SERVER_IP}${ADMIN_PREFIX}"
 fi
 
+# ==========================================
+# ФИНАЛЬНЫЙ ЭКРАН (ОТРАБАТЫВАЕТ ВСЕГДА)
+# ==========================================
 echo -e "\n${GREEN}=================================================${NC}"
 echo -e "${GREEN} Установка ${APP_NAME} успешно завершена!        ${NC}"
 echo -e "${GREEN}=================================================${NC}"
@@ -240,7 +276,7 @@ if [ "$DB_CHOICE" == "2" ]; then
     echo -e "Менеджеры:         ${BLUE}userm1 ... userm5${NC} / passwordAMS32"
 else
     echo -e "\n${YELLOW}--- БОЕВЫЕ УЧЕТНЫЕ ЗАПИСИ ---${NC}"
-    echo -e "Суперадмин:        ${BLUE}amsadmin${NC} / (Ваш пароль)"
+    echo -e "Суперадмин:        ${BLUE}amsadmin${NC} / ${ADMIN_UI_PASS}"
     echo -e "Директор:          ${BLUE}amsdirektor${NC} / amsdirektor"
     echo -e "Менеджер:          ${BLUE}amsmanager${NC} / amsmanager"
 fi
